@@ -124,8 +124,9 @@ run:
 	@echo "==> Running gesture translator CLI (synthetic stream)..."
 	$(CONTAINER_RUN) uv run python -m sign_translator.cli --source synthetic --max-frames 50
 
+VIDEO ?= data/sample_gesture.mp4
+
 run-video:
-	@if [ -z "$(VIDEO)" ]; then echo "Usage: make run-video VIDEO=data/sample.mp4"; exit 1; fi
 	@echo "==> Running gesture translator on video file [$(VIDEO)]..."
 	$(CONTAINER_RUN) uv run python -m sign_translator.cli --source $(VIDEO)
 

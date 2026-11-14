@@ -1,0 +1,13 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Containerfile
+    volumes:
+      # :Z flag ensures rootless Podman SELinux relabeling
+      - .:/app:Z
+    environment:
+      - PYTHONUNBUFFERED=1
+      - APP_ENV=development
+      - UV_LINK_MODE=copy
+    command: ["uv", "run", "pytest", "-v"]

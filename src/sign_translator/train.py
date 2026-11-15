@@ -17,6 +17,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from sign_translator.architecture import build_model
+from sign_translator.device import resolve_torch_device
 from sign_translator.normalize import normalize_landmarks
 from sign_translator.schemas import PipelineConfig, TrainingConfig, TrainResult
 
@@ -191,24 +192,34 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
+    scaler: torch.amp.GradScaler | None = None,
+    use_amp: bool = False,
 ) -> tuple[float, float]:
-    """Execute one training epoch with gradient clipping."""
+    """Execute one training epoch with gradient clipping and optional AMP."""
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
 
     for x_batch, y_batch in loader:
-        x_batch = x_batch.to(device)
-        y_batch = y_batch.to(device)
+        x_batch = x_batch.to(device, non_blocking=True)
+        y_batch = y_batch.to(device, non_blocking=True)
 
         optimizer.zero_grad()
-        logits = model(x_batch)
-        loss = criterion(logits, y_batch)
-        loss.backward()
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            logits = model(x_batch)
+            loss = criterion(logits, y_batch)
 
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-        optimizer.step()
+        if scaler is not None and use_amp:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
 
         running_loss += float(loss.item()) * len(y_batch)
         preds = torch.argmax(logits, dim=-1)
@@ -225,8 +236,9 @@ def evaluate(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    use_amp: bool = False,
 ) -> tuple[float, float]:
-    """Evaluate model without computing gradients."""
+    """Evaluate model without computing gradients and with optional AMP."""
     model.eval()
     running_loss = 0.0
     correct = 0
@@ -234,11 +246,12 @@ def evaluate(
 
     with torch.no_grad():
         for x_batch, y_batch in loader:
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
+            x_batch = x_batch.to(device, non_blocking=True)
+            y_batch = y_batch.to(device, non_blocking=True)
 
-            logits = model(x_batch)
-            loss = criterion(logits, y_batch)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                logits = model(x_batch)
+                loss = criterion(logits, y_batch)
 
             running_loss += float(loss.item()) * len(y_batch)
             preds = torch.argmax(logits, dim=-1)
@@ -309,7 +322,10 @@ def train_model(
     torch.manual_seed(training_config.seed)
     np.random.seed(training_config.seed)
 
-    device = torch.device(training_config.device)
+    device = resolve_torch_device(training_config.device)
+    use_cuda = device.type == "cuda"
+    use_amp = use_cuda and training_config.mixed_precision
+    pin_mem = use_cuda and training_config.pin_memory
 
     # Ingest or synthesize dataset
     if dataset is None:
@@ -335,11 +351,13 @@ def train_model(
         train_sub,
         batch_size=training_config.batch_size,
         shuffle=True,
+        pin_memory=pin_mem,
     )
     val_loader = DataLoader(
         val_sub,
         batch_size=training_config.batch_size,
         shuffle=False,
+        pin_memory=pin_mem,
     )
 
     model = build_model(pipeline_config).to(device)
@@ -349,6 +367,7 @@ def train_model(
         weight_decay=training_config.weight_decay,
     )
     criterion = nn.CrossEntropyLoss()
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_cuda else None
 
     best_val_acc = 0.0
     best_val_loss = float("inf")
@@ -362,8 +381,16 @@ def train_model(
     best_model_state: dict[str, Any] | None = None
 
     for epoch in range(training_config.epochs):
-        t_loss, _ = train_epoch(model, train_loader, optimizer, criterion, device)
-        v_loss, v_acc = evaluate(model, val_loader, criterion, device)
+        t_loss, _ = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            criterion,
+            device,
+            scaler=scaler,
+            use_amp=use_amp,
+        )
+        v_loss, v_acc = evaluate(model, val_loader, criterion, device, use_amp=use_amp)
 
         train_losses.append(t_loss)
         val_losses.append(v_loss)
@@ -394,6 +421,7 @@ def train_model(
         model.load_state_dict(best_model_state)
 
     duration = time.time() - start_time
+    gpu_name = torch.cuda.get_device_name(device) if use_cuda else None
 
     result = TrainResult(
         best_val_accuracy=float(best_val_acc),
@@ -407,6 +435,8 @@ def train_model(
         training_duration_seconds=float(duration),
         model_architecture=pipeline_config.architecture.value,
         num_classes=len(pipeline_config.vocabulary),
+        device_used=str(device),
+        gpu_name=gpu_name,
     )
 
     return model, result

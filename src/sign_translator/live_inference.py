@@ -12,13 +12,14 @@ import threading
 import time
 from collections import Counter, deque
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import torch
 from torch import nn
 
 from sign_translator.collect_data import FrameCaptureSource, HandLandmarkExtractor
+from sign_translator.device import resolve_ort_providers, resolve_torch_device
 from sign_translator.schemas import (
     GesturePrediction,
     PipelineConfig,
@@ -27,6 +28,7 @@ from sign_translator.schemas import (
 )
 
 
+@runtime_checkable
 class TTSEngine(Protocol):
     """Protocol defining interface for text-to-speech audio engines."""
 
@@ -226,6 +228,7 @@ class PredictionSmoother:
         self._last_trigger_times.clear()
 
 
+@runtime_checkable
 class SequenceModelRunner(Protocol):
     """Protocol for sequence model inference backends."""
 
@@ -244,14 +247,14 @@ class SequenceModelRunner(Protocol):
 class PyTorchModelRunner:
     """PyTorch execution backend for sequence classification models."""
 
-    def __init__(self, model: nn.Module, device: str = "cpu") -> None:
+    def __init__(self, model: nn.Module, device: str = "auto") -> None:
         self.model = model
-        self.device = torch.device(device)
+        self.device = resolve_torch_device(device)
         self.model.to(self.device)
         self.model.eval()
 
     def predict_proba(self, sequence: np.ndarray) -> np.ndarray:
-        t = torch.from_numpy(sequence).unsqueeze(0).float().to(self.device)
+        t = torch.from_numpy(sequence).unsqueeze(0).float().to(self.device, non_blocking=True)
         with torch.no_grad():
             logits = self.model(t)
             probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
@@ -266,8 +269,9 @@ class ONNXModelRunner:
         model_path: Path | str,
         num_threads: int = 2,
         inter_op_threads: int = 1,
-        execution_provider: str = "CPUExecutionProvider",
+        execution_provider: str = "auto",
         graph_optimization_level: str = "all",
+        device: str | None = None,
     ) -> None:
         self.model_path = Path(model_path)
         if not self.model_path.exists():
@@ -289,14 +293,26 @@ class ONNXModelRunner:
             graph_optimization_level.lower(), ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         )
 
-        available_providers = ort.get_available_providers()
-        providers = (
-            [execution_provider]
-            if execution_provider in available_providers
-            else ["CPUExecutionProvider"]
-        )
+        target_provider = device if device is not None else execution_provider
+        providers = resolve_ort_providers(target_provider)
 
-        self.session = ort.InferenceSession(str(self.model_path), sess_options, providers=providers)
+        try:
+            self.session = ort.InferenceSession(
+                str(self.model_path), sess_options, providers=providers
+            )
+        except Exception:
+            # Fallback to CPU if provider initialization failed
+            providers = ["CPUExecutionProvider"]
+            self.session = ort.InferenceSession(
+                str(self.model_path), sess_options, providers=providers
+            )
+
+        self.active_provider: str = (
+            self.session.get_providers()[0]
+            if self.session.get_providers()
+            else "CPUExecutionProvider"
+        )
+        self.device: str = "cuda:0" if "CUDA" in self.active_provider else "cpu"
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
         input_shape = self.session.get_inputs()[0].shape
@@ -356,9 +372,11 @@ class RealtimeGesturePipeline:
         self.capture_source = capture_source
 
         if isinstance(model, nn.Module):
-            self.model_runner: SequenceModelRunner = PyTorchModelRunner(model)
+            self.model_runner: SequenceModelRunner = PyTorchModelRunner(
+                model, device=self.config.device
+            )
         elif isinstance(model, (str, Path)):
-            self.model_runner = ONNXModelRunner(model)
+            self.model_runner = ONNXModelRunner(model, execution_provider=self.config.device)
         elif model is not None:
             self.model_runner = model
         elif self.config.use_onnx:
@@ -366,13 +384,14 @@ class RealtimeGesturePipeline:
                 model_path=self.config.onnx_model_path,
                 num_threads=self.config.onnx_intra_op_threads,
                 inter_op_threads=self.config.onnx_inter_op_threads,
+                execution_provider=self.config.device,
                 graph_optimization_level=self.config.onnx_graph_optimization_level,
             )
         else:
             from sign_translator.architecture import build_model
 
             nn_model = build_model(self.config)
-            self.model_runner = PyTorchModelRunner(nn_model)
+            self.model_runner = PyTorchModelRunner(nn_model, device=self.config.device)
 
         self.extractor = landmark_extractor or HandLandmarkExtractor(
             min_detection_confidence=0.7,

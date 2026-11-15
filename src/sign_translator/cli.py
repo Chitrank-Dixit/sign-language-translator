@@ -41,6 +41,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Maximum frames to process before stopping (default: run until stream ends)",
     )
     parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+        help="Compute device for inference: 'auto' (detects CUDA or falls back to CPU), 'cuda', or 'cpu'",
+    )
+    parser.add_argument(
         "--no-tts",
         action="store_true",
         help="Disable Text-to-Speech audio output",
@@ -61,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 70)
     print(f" Source:      {args.source}")
     print(f" Model:       {args.model}")
+    print(f" Device:      {args.device}")
     print(f" TTS Output:  {'Disabled' if args.no_tts else 'Enabled'}")
     print("=" * 70)
 
@@ -85,15 +93,20 @@ def main(argv: list[str] | None = None) -> int:
     model_path = Path(args.model)
     model_runner = None
     if model_path.exists() and model_path.suffix.lower() == ".onnx":
-        print(f"==> Loading ONNX inference runtime: {model_path}...")
-        model_runner = ONNXModelRunner(model_path)
+        print(f"==> Loading ONNX inference runtime: {model_path} (device: {args.device})...")
+        model_runner = ONNXModelRunner(model_path, device=args.device)
     elif model_path.exists() and model_path.suffix.lower() == ".pt":
+        from sign_translator.live_inference import PyTorchModelRunner
         from sign_translator.train import load_checkpoint
 
-        print(f"==> Loading PyTorch checkpoint: {model_path}...")
-        model_runner, _ = load_checkpoint(model_path)
+        print(f"==> Loading PyTorch checkpoint: {model_path} (device: {args.device})...")
+        pt_model, _ = load_checkpoint(model_path)
+        model_runner = PyTorchModelRunner(pt_model, device=args.device)
 
-    config = PipelineConfig(cooldown_seconds=args.cooldown)
+    config = PipelineConfig(
+        cooldown_seconds=args.cooldown,
+        device=args.device,
+    )
 
     pipeline = RealtimeGesturePipeline(
         config=config,

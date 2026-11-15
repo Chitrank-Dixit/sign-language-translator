@@ -14,6 +14,12 @@ from sign_translator.collect_data import (
     SyntheticCaptureSource,
     ThreadedFrameReader,
 )
+from sign_translator.device import (
+    get_device_telemetry,
+    is_cuda_available,
+    resolve_ort_providers,
+    resolve_torch_device,
+)
 from sign_translator.export_onnx import (
     benchmark_inference,
     export_torch_to_onnx,
@@ -35,6 +41,7 @@ from sign_translator.schemas import (
     BenchmarkConfig,
     BenchmarkResult,
     DataCollectionConfig,
+    DeviceType,
     ExportResult,
     GesturePrediction,
     LandmarkFrame,
@@ -63,6 +70,7 @@ __all__ = [
     "BenchmarkConfig",
     "BenchmarkResult",
     "DataCollectionConfig",
+    "DeviceType",
     "DummyTTSEngine",
     "ExportResult",
     "FrameCaptureSource",
@@ -97,9 +105,13 @@ __all__ = [
     "build_model",
     "export_torch_to_onnx",
     "generate_synthetic_dataset",
+    "get_device_telemetry",
+    "is_cuda_available",
     "load_checkpoint",
     "normalize_landmarks",
     "normalize_single_hand",
+    "resolve_ort_providers",
+    "resolve_torch_device",
     "save_checkpoint",
     "stratified_split",
     "train_model",

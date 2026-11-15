@@ -1,0 +1,8 @@
+services:
+  app:
+    devices:
+      - nvidia.com/gpu=all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - SIGN_TR_DEVICE=auto

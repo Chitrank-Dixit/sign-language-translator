@@ -44,7 +44,15 @@ class FrameCaptureSource(Protocol):
 class OpenCVCaptureSource:
     """Standard OpenCV VideoCapture source wrapper supporting webcams or video files."""
 
-    def __init__(self, source: int | str | Path = 0) -> None:
+    def __init__(
+        self,
+        source: int | str | Path | None = None,
+        camera_index: int | None = None,
+    ) -> None:
+        if camera_index is not None and source is None:
+            source = camera_index
+        elif source is None:
+            source = 0
         self.source = source
         source_arg: Any = str(source) if isinstance(source, (str, Path)) else source
         self._cap = cv2.VideoCapture(source_arg)

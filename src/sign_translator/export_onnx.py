@@ -20,6 +20,10 @@ import onnxruntime as ort
 import torch
 from torch import nn
 
+from sign_translator.device import (
+    get_device_telemetry,
+    is_cuda_available,
+)
 from sign_translator.schemas import (
     BenchmarkConfig,
     BenchmarkResult,
@@ -159,6 +163,7 @@ def verify_onnx_parity(
     feature_dim: int = 126,
     batch_sizes: tuple[int, ...] = (1, 4),
     atol: float = 1e-5,
+    providers: list[str] | None = None,
 ) -> float:
     """Verify numerical parity between PyTorch and ONNX Runtime logits across batch sizes.
 
@@ -169,6 +174,7 @@ def verify_onnx_parity(
         feature_dim: Feature dimension (D) per frame.
         batch_sizes: Tuple of mini-batch sizes to validate dynamic batching.
         atol: Maximum allowed absolute numerical difference.
+        providers: Optional execution providers for ONNX Runtime session (defaults to CPU).
 
     Returns:
         Peak absolute difference observed across all evaluated batch sizes.
@@ -186,10 +192,11 @@ def verify_onnx_parity(
     session_opts = ort.SessionOptions()
     session_opts.intra_op_num_threads = 2
     session_opts.inter_op_num_threads = 1
+    active_providers = providers if providers is not None else ["CPUExecutionProvider"]
     session = ort.InferenceSession(
         str(path),
         session_opts,
-        providers=["CPUExecutionProvider"],
+        providers=active_providers,
     )
 
     input_name = session.get_inputs()[0].name
@@ -229,7 +236,7 @@ def benchmark_inference(
     """Profile inference latency and throughput for a sequence classification runner.
 
     Executes cache warmup iterations followed by high-resolution time profiling
-    using time.perf_counter().
+    using time.perf_counter(). Supports CUDA synchronization when running on GPU.
 
     Args:
         runner: Object implementing SequenceModelRunner protocol.
@@ -242,6 +249,53 @@ def benchmark_inference(
     """
     cfg = config or BenchmarkConfig()
 
+    # Determine whether runner is operating on CUDA
+    runner_device = getattr(runner, "device", None)
+    session = getattr(runner, "session", None) or getattr(runner, "_session", None)
+    is_cuda = False
+    active_device = "cpu"
+    active_provider = "CPUExecutionProvider"
+
+    raw_provider = getattr(runner, "active_provider", None)
+    if raw_provider is not None and isinstance(raw_provider, str):
+        active_provider = raw_provider
+        raw_dev = getattr(runner, "device", None)
+        active_device = (
+            str(raw_dev)
+            if raw_dev is not None and isinstance(raw_dev, (str, torch.device))
+            else ("cuda:0" if "CUDA" in active_provider else "cpu")
+        )
+        is_cuda = "CUDA" in active_provider or "cuda" in active_device
+    elif session is not None:
+        try:
+            providers = session.get_providers()
+            if providers and isinstance(providers[0], str):
+                active_provider = providers[0]
+                if "CUDAExecutionProvider" in active_provider:
+                    is_cuda = True
+                    active_device = "cuda:0"
+        except Exception:
+            pass
+    elif (
+        runner_device is not None
+        and "cuda" in str(runner_device)
+        and isinstance(runner_device, (str, torch.device))
+    ):
+        is_cuda = True
+        active_device = str(runner_device)
+        active_provider = "PyTorch-CUDA"
+    elif (
+        runner_device is not None
+        and "cpu" in str(runner_device)
+        and isinstance(runner_device, (str, torch.device))
+    ):
+        is_cuda = False
+        active_device = "cpu"
+        active_provider = "PyTorch-CPU"
+    elif cfg.device != "auto" and "cuda" in cfg.device:
+        is_cuda = True
+        active_device = cfg.device
+
     np.random.seed(42)
     if cfg.batch_size == 1:
         sample_input = np.random.randn(sequence_length, feature_dim).astype(np.float32)
@@ -253,12 +307,18 @@ def benchmark_inference(
     # Warmup phase
     for _ in range(cfg.num_warmup):
         _ = runner.predict_proba(sample_input)
+    if is_cuda and torch.cuda.is_available():
+        torch.cuda.synchronize()
 
     # Measurement phase
     latencies: list[float] = []
     for _ in range(cfg.num_iterations):
+        if is_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
         _ = runner.predict_proba(sample_input)
+        if is_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
         latencies.append((time.perf_counter() - t0) * 1000.0)
 
     mean_lat = float(statistics.mean(latencies))
@@ -277,8 +337,14 @@ def benchmark_inference(
 
     backend_name = runner.__class__.__name__
 
+    telemetry = get_device_telemetry() if (is_cuda or is_cuda_available()) else {}
+    gpu_name = str(telemetry["gpu_name"]) if telemetry.get("gpu_name") else None
+    vram_mb = float(telemetry["vram_allocated_mb"]) if telemetry.get("vram_allocated_mb") else None
+
     return BenchmarkResult(
         backend=backend_name,
+        device=active_device,
+        execution_provider=active_provider,
         batch_size=cfg.batch_size,
         num_iterations=cfg.num_iterations,
         mean_latency_ms=mean_lat,
@@ -289,6 +355,8 @@ def benchmark_inference(
         max_latency_ms=max_lat,
         throughput_fps=fps,
         meets_target=mean_lat <= cfg.target_latency_ms,
+        gpu_name=gpu_name,
+        vram_allocated_mb=vram_mb,
         timestamp=datetime.now(UTC),
     )
 

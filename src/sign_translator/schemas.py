@@ -6,6 +6,7 @@ tensors, and real-time inference predictions.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -18,6 +19,14 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class DeviceType(StrEnum):
+    """Supported execution and acceleration compute device targets."""
+
+    AUTO = "auto"
+    CUDA = "cuda"
+    CPU = "cpu"
 
 
 class ModelArchitecture(StrEnum):
@@ -168,10 +177,30 @@ class PipelineConfig(BaseSettings):
         default="all",
         description="Graph optimization level (all | basic | extended | disable).",
     )
+    device: str = Field(
+        default="auto",
+        description="Compute device target ('auto', 'cuda', 'cpu', 'cuda:<id>').",
+    )
+    execution_providers: list[str] | None = Field(
+        default=None,
+        description="Explicit ONNX execution provider priority list.",
+    )
     data_dir: str = Field(
         default="data/sequences",
         description="Base directory for captured NumPy sequence datasets.",
     )
+
+    @field_validator("device")
+    @classmethod
+    def validate_device(cls, v: str) -> str:
+        cleaned = v.strip().lower()
+        if cleaned in {"auto", "cpu", "cuda"}:
+            return cleaned
+        if re.match(r"^cuda:\d+$", cleaned):
+            return cleaned
+        raise ValueError(
+            f"Invalid device target '{v}'. Expected 'auto', 'cuda', 'cpu', or 'cuda:<id>'."
+        )
 
     @field_validator("vocabulary")
     @classmethod
@@ -457,8 +486,16 @@ class TrainingConfig(BaseModel):
         description="Random seed for reproducibility across splits and initialization.",
     )
     device: str = Field(
-        default="cpu",
-        description="Compute device target ('cpu', 'cuda').",
+        default="auto",
+        description="Compute device target ('auto', 'cuda', 'cpu', 'cuda:<id>').",
+    )
+    mixed_precision: bool = Field(
+        default=True,
+        description="Enable torch.amp mixed precision acceleration on CUDA devices.",
+    )
+    pin_memory: bool = Field(
+        default=True,
+        description="Enable pinned host memory for asynchronous CUDA DataLoader transfers.",
     )
     checkpoint_path: str = Field(
         default="models/weights/best_model.pt",
@@ -470,6 +507,18 @@ class TrainingConfig(BaseModel):
         le=100,
         description="Number of non-improving epochs before early stopping triggers.",
     )
+
+    @field_validator("device")
+    @classmethod
+    def validate_training_device(cls, v: str) -> str:
+        cleaned = v.strip().lower()
+        if cleaned in {"auto", "cpu", "cuda"}:
+            return cleaned
+        if re.match(r"^cuda:\d+$", cleaned):
+            return cleaned
+        raise ValueError(
+            f"Invalid training device '{v}'. Expected 'auto', 'cuda', 'cpu', or 'cuda:<id>'."
+        )
 
     @field_validator("checkpoint_path", mode="before")
     @classmethod
@@ -537,6 +586,14 @@ class TrainResult(BaseModel):
         ...,
         ge=2,
         description="Number of target gesture classes trained.",
+    )
+    device_used: str = Field(
+        default="cpu",
+        description="Actual compute device utilized during training (e.g. 'cuda:0', 'cpu').",
+    )
+    gpu_name: str | None = Field(
+        default=None,
+        description="GPU hardware model if CUDA was utilized.",
     )
 
 
@@ -723,9 +780,34 @@ class BenchmarkConfig(BaseModel):
     batch_size: int = Field(
         default=1, ge=1, le=128, description="Mini-batch size evaluated per iteration."
     )
+    batch_sizes: list[int] = Field(
+        default_factory=lambda: [1, 8, 32, 64],
+        min_length=1,
+        description="List of batch sizes to evaluate in throughput/latency profiling sweep.",
+    )
     target_latency_ms: float = Field(
         default=5.0, gt=0.0, le=100.0, description="Acceptance threshold in milliseconds."
     )
+    device: str = Field(
+        default="auto",
+        description="Target compute device for benchmark ('auto', 'cuda', 'cpu').",
+    )
+    execution_provider: str = Field(
+        default="auto",
+        description="Target execution provider ('auto', 'CPUExecutionProvider', 'CUDAExecutionProvider').",
+    )
+
+    @field_validator("device")
+    @classmethod
+    def validate_device(cls, v: str) -> str:
+        cleaned = v.strip().lower()
+        if cleaned in {"auto", "cpu", "cuda"}:
+            return cleaned
+        if re.match(r"^cuda:\d+$", cleaned):
+            return cleaned
+        raise ValueError(
+            f"Invalid device target '{v}'. Expected 'auto', 'cuda', 'cpu', or 'cuda:<id>'."
+        )
 
 
 class BenchmarkResult(BaseModel):
@@ -734,8 +816,25 @@ class BenchmarkResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
 
     backend: str = Field(
-        ..., description="Inference runtime identifier ('onnxruntime-cpu', 'pytorch-cpu')."
+        ..., description="Inference runtime identifier ('ONNXModelRunner', 'PyTorchModelRunner')."
     )
+    device: str = Field(
+        default="cpu",
+        description="Actual compute device evaluated ('cpu', 'cuda:0').",
+    )
+    execution_provider: str = Field(
+        default="CPUExecutionProvider",
+        description="Active ONNX execution provider.",
+    )
+
+    @field_validator("device")
+    @classmethod
+    def validate_device(cls, v: str) -> str:
+        cleaned = v.strip().lower()
+        if cleaned in {"cpu", "cuda"} or re.match(r"^cuda:\d+$", cleaned):
+            return cleaned
+        raise ValueError(f"Invalid benchmark device '{v}'. Expected 'cpu', 'cuda', or 'cuda:<id>'.")
+
     batch_size: int = Field(..., ge=1, description="Evaluated batch size.")
     num_iterations: int = Field(..., ge=10, description="Total timed iterations completed.")
     mean_latency_ms: float = Field(
@@ -750,6 +849,14 @@ class BenchmarkResult(BaseModel):
     max_latency_ms: float = Field(..., ge=0.0, description="Maximum recorded latency in ms.")
     throughput_fps: float = Field(..., ge=0.0, description="Effective inferences per second.")
     meets_target: bool = Field(..., description="True if mean_latency_ms <= target_latency_ms.")
+    gpu_name: str | None = Field(
+        default=None,
+        description="GPU hardware model if CUDA was evaluated.",
+    )
+    vram_allocated_mb: float | None = Field(
+        default=None,
+        description="Peak GPU memory allocated in MB if CUDA was evaluated.",
+    )
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when benchmark completed.",

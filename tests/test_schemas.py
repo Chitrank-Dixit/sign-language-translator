@@ -310,7 +310,9 @@ class TestTrainingConfig:
         assert config.weight_decay == 1e-4
         assert config.val_split == 0.2
         assert config.seed == 42
-        assert config.device == "cpu"
+        assert config.device == "auto"
+        assert config.mixed_precision is True
+        assert config.pin_memory is True
         assert config.checkpoint_path == "models/weights/best_model.pt"
         assert config.early_stopping_patience == 5
 

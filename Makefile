@@ -3,7 +3,7 @@
 # ==============================================================================
 
 .DEFAULT_GOAL := help
-.PHONY: help build test test-cov lint lint-fix format format-check check train export-onnx benchmark smoke-test run run-video run-camera shell clean
+.PHONY: help build test test-cov lint lint-fix format format-check check train train-gpu export-onnx benchmark benchmark-gpu smoke-test run run-gpu run-video run-camera shell clean
 
 # ------------------------------------------------------------------------------
 # Container & Environment Configuration
@@ -50,10 +50,13 @@ help:
 	@echo ""
 	@echo " Model & Pipeline Operations:"
 	@echo "   make train         - Train sequence model (LSTM / Transformer)"
+	@echo "   make train-gpu     - Train sequence model with CUDA acceleration & AMP"
 	@echo "   make export-onnx   - Export PyTorch checkpoint to ONNX with dynamic batching"
 	@echo "   make benchmark     - Run ONNX CPU latency benchmark (target < 5.0 ms)"
+	@echo "   make benchmark-gpu - Run ONNX GPU latency benchmark (CUDAExecutionProvider)"
 	@echo "   make smoke-test    - Run real-time inference pipeline synthetic smoke test"
 	@echo "   make run           - Run CLI translator on synthetic video stream"
+	@echo "   make run-gpu       - Run CLI translator on synthetic stream with CUDA device"
 	@echo "   make run-video     - Run CLI translator on a video file (VIDEO=path.mp4)"
 	@echo "   make run-camera    - Run CLI translator on live webcam stream"
 	@echo ""
@@ -108,6 +111,10 @@ train:
 	@echo "==> Running sequence model training pipeline..."
 	$(CONTAINER_RUN) uv run python -m sign_translator.train
 
+train-gpu:
+	@echo "==> Running sequence model training with CUDA acceleration..."
+	$(CONTAINER_RUN) uv run python -c "from sign_translator.train import train_model; from sign_translator.schemas import TrainingConfig; train_model(TrainingConfig(device='cuda', mixed_precision=True))"
+
 export-onnx:
 	@echo "==> Exporting PyTorch model to ONNX format..."
 	$(CONTAINER_RUN) uv run python -m sign_translator.export_onnx
@@ -116,6 +123,10 @@ benchmark:
 	@echo "==> Benchmarking ONNX inference latency on CPU..."
 	$(CONTAINER_RUN) uv run python -c "from sign_translator.live_inference import ONNXModelRunner; from sign_translator.export_onnx import benchmark_inference; runner = ONNXModelRunner('models/exported/gesture_model.onnx'); res = benchmark_inference(runner); print('Mean Latency:', round(res.mean_latency_ms, 4), 'ms | Throughput:', round(res.throughput_fps), 'FPS | Target < 5.0ms:', res.meets_target)"
 
+benchmark-gpu:
+	@echo "==> Benchmarking ONNX inference latency on GPU (CUDAExecutionProvider)..."
+	$(CONTAINER_RUN) uv run python -c "from sign_translator.live_inference import ONNXModelRunner; from sign_translator.export_onnx import benchmark_inference; from sign_translator.schemas import BenchmarkConfig; runner = ONNXModelRunner('models/exported/gesture_model.onnx', device='cuda'); res = benchmark_inference(runner, config=BenchmarkConfig(device='cuda', execution_provider='CUDAExecutionProvider')); print('Backend:', res.backend, '| Device:', res.device, '| Provider:', res.execution_provider, '| Mean Latency:', round(res.mean_latency_ms, 4), 'ms | FPS:', round(res.throughput_fps))"
+
 smoke-test:
 	@echo "==> Running real-time inference synthetic stream smoke test..."
 	$(CONTAINER_RUN) uv run python -c "from sign_translator.live_inference import RealtimeGesturePipeline; from sign_translator.collect_data import SyntheticCaptureSource; p = RealtimeGesturePipeline(capture_source=SyntheticCaptureSource(max_frames=35), gesture_classes=['hello', 'thank_you', 'yes', 'no']); res = p.run(max_frames=35); print('Processed', len(res), 'frames successfully')"
@@ -123,6 +134,10 @@ smoke-test:
 run:
 	@echo "==> Running gesture translator CLI (synthetic stream)..."
 	$(CONTAINER_RUN) uv run python -m sign_translator.cli --source synthetic --max-frames 50
+
+run-gpu:
+	@echo "==> Running gesture translator CLI with CUDA acceleration..."
+	$(CONTAINER_RUN) uv run python -m sign_translator.cli --source synthetic --max-frames 50 --device cuda
 
 VIDEO ?= data/sample_gesture.mp4
 

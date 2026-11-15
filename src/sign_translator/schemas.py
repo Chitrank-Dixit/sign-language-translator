@@ -797,18 +797,6 @@ class BenchmarkConfig(BaseModel):
         description="Target execution provider ('auto', 'CPUExecutionProvider', 'CUDAExecutionProvider').",
     )
 
-    @field_validator("device")
-    @classmethod
-    def validate_device(cls, v: str) -> str:
-        cleaned = v.strip().lower()
-        if cleaned in {"auto", "cpu", "cuda"}:
-            return cleaned
-        if re.match(r"^cuda:\d+$", cleaned):
-            return cleaned
-        raise ValueError(
-            f"Invalid device target '{v}'. Expected 'auto', 'cuda', 'cpu', or 'cuda:<id>'."
-        )
-
 
 class BenchmarkResult(BaseModel):
     """Detailed statistical metrics emitted by inference latency benchmark."""
@@ -826,15 +814,6 @@ class BenchmarkResult(BaseModel):
         default="CPUExecutionProvider",
         description="Active ONNX execution provider.",
     )
-
-    @field_validator("device")
-    @classmethod
-    def validate_device(cls, v: str) -> str:
-        cleaned = v.strip().lower()
-        if cleaned in {"cpu", "cuda"} or re.match(r"^cuda:\d+$", cleaned):
-            return cleaned
-        raise ValueError(f"Invalid benchmark device '{v}'. Expected 'cpu', 'cuda', or 'cuda:<id>'.")
-
     batch_size: int = Field(..., ge=1, description="Evaluated batch size.")
     num_iterations: int = Field(..., ge=10, description="Total timed iterations completed.")
     mean_latency_ms: float = Field(

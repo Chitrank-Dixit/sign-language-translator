@@ -189,6 +189,10 @@ class PipelineConfig(BaseSettings):
         default="data/sequences",
         description="Base directory for captured NumPy sequence datasets.",
     )
+    mediapipe_model_path: str = Field(
+        default="models/hand_landmarker.task",
+        description="Filesystem path to MediaPipe HandLandmarker task model asset.",
+    )
 
     @field_validator("device")
     @classmethod
@@ -797,6 +801,18 @@ class BenchmarkConfig(BaseModel):
         description="Target execution provider ('auto', 'CPUExecutionProvider', 'CUDAExecutionProvider').",
     )
 
+    @field_validator("device")
+    @classmethod
+    def validate_device(cls, v: str) -> str:
+        cleaned = v.strip().lower()
+        if cleaned in {"auto", "cpu", "cuda"}:
+            return cleaned
+        if re.match(r"^cuda:\d+$", cleaned):
+            return cleaned
+        raise ValueError(
+            f"Invalid device target '{v}'. Expected 'auto', 'cuda', 'cpu', or 'cuda:<id>'."
+        )
+
 
 class BenchmarkResult(BaseModel):
     """Detailed statistical metrics emitted by inference latency benchmark."""
@@ -840,3 +856,13 @@ class BenchmarkResult(BaseModel):
         default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when benchmark completed.",
     )
+
+    @field_validator("device")
+    @classmethod
+    def validate_concrete_device(cls, v: str) -> str:
+        cleaned = v.strip().lower()
+        if cleaned in {"cpu", "cuda"}:
+            return cleaned
+        if re.match(r"^cuda:\d+$", cleaned):
+            return cleaned
+        raise ValueError(f"Invalid benchmark device '{v}'. Expected 'cpu', 'cuda', or 'cuda:<id>'.")

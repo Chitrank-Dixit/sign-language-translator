@@ -166,7 +166,12 @@ class HandLandmarkExtractor:
         self.min_tracking_confidence = min_tracking_confidence
         self.handedness_aware = handedness_aware
         self.normalize = normalize
-        self.model_path = Path(model_path) if model_path else None
+        if model_path:
+            self.model_path = Path(model_path)
+        elif Path("models/hand_landmarker.task").exists():
+            self.model_path = Path("models/hand_landmarker.task")
+        else:
+            self.model_path = None
         self._landmarker: Any = None
 
         if self.model_path and self.model_path.exists():

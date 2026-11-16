@@ -398,6 +398,7 @@ class RealtimeGesturePipeline:
             min_tracking_confidence=0.5,
             handedness_aware=True,
             normalize=True,
+            model_path=getattr(self.config, "mediapipe_model_path", None),
         )
 
         self.smoother = smoother or PredictionSmoother(

@@ -276,11 +276,19 @@ def benchmark_inference(
                     active_device = "cuda:0"
         except Exception:
             pass
-    elif runner_device is not None and "cuda" in str(runner_device) and isinstance(runner_device, (str, torch.device)):
+    elif (
+        runner_device is not None
+        and "cuda" in str(runner_device)
+        and isinstance(runner_device, (str, torch.device))
+    ):
         is_cuda = True
         active_device = str(runner_device)
         active_provider = "PyTorch-CUDA"
-    elif runner_device is not None and "cpu" in str(runner_device) and isinstance(runner_device, (str, torch.device)):
+    elif (
+        runner_device is not None
+        and "cpu" in str(runner_device)
+        and isinstance(runner_device, (str, torch.device))
+    ):
         is_cuda = False
         active_device = "cpu"
         active_provider = "PyTorch-CPU"
